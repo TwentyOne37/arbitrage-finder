@@ -1,0 +1,46 @@
+### Scala/sbt ###
+target/
+project/target/
+project/project/
+lib_managed/
+src_managed/
+.idea/
+*.iml
+*.iws
+*.ipr
+.cache
+.cache-main
+.history
+.classpath
+.project
+.settings/
+.scala-build/
+out/
+*.class
+*.log
+
+### IntelliJ IDEA ###
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+### VS Code ###
+.vscode/
+
+### Eclipse ###
+.classpath
+.project
+.settings/
+
+### NetBeans ###
+/nbproject/private/
+build/
+nbbuild/
+dist/
+nbdist/
+.nb-gradle/
+
+### Mac OS ###
+.DS_Store
