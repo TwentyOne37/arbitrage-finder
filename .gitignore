@@ -28,6 +28,7 @@ out/
 
 ### VS Code ###
 .vscode/
+.metals/
 
 ### Eclipse ###
 .classpath

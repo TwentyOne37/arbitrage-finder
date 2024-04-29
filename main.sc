@@ -86,12 +86,11 @@ def findArbitrage(
 
 object Main extends IOApp.Simple {
   def run: IO[Unit] = {
-    val startTime = System.nanoTime()
-
     val backendResource = HttpClientCatsBackend.resource[IO]()
 
     backendResource.use { backend =>
       val request = basicRequest.get(uri"$url").response(asJson[RatesResponse])
+      val startTime = System.nanoTime()
 
       for {
         response <- request.send(backend)
@@ -104,13 +103,13 @@ object Main extends IOApp.Simple {
             }.toList
             val vertices = ratesResponse.rates.keys.flatMap(_.split("-")).toSet
 
-            // Gather all arbitrage results
+            // Gather all findArbitrage results
             val allArbitrageResults = vertices
               .map(vertex => findArbitrage(edges, vertices, vertex))
               .toList
               .parTraverse(
                 identity
-              ) // Ensure this runs and collects all results before processing
+              )
               .map(_.flatten)
 
             // Process all gathered results to find the best
