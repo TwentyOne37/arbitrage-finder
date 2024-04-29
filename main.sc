@@ -3,12 +3,17 @@
 // Scala CLI dependencies
 //> using dep "com.softwaremill.sttp.client4::core:4.0.0-M12"
 //> using dep "com.softwaremill.sttp.client4::circe:4.0.0-M12"
+//> using dep "org.typelevel::cats-core:2.10.0"
+//> using dep "org.typelevel::cats-effect:3.5.4"
 //> using dep "io.circe::circe-core:0.14.7"
 //> using dep "io.circe::circe-generic:0.14.7"
 //> using dep "io.circe::circe-parser:0.14.7"
 
 import sttp.client4._
 import sttp.client4.circe._
+import cats.effect.{IO, IOApp}
+import cats.effect.unsafe.implicits.global
+import cats.implicits._
 import io.circe.generic.auto._
 import sttp.client4.httpclient.HttpClientSyncBackend
 
@@ -30,15 +35,13 @@ def findArbitrage(
     edges: List[Edge],
     vertices: Set[String],
     startCurrency: String
-): Option[List[Edge]] = {
+): IO[Option[(Double, List[Edge])]] = IO {
   val distances =
-    mutable.Map(vertices.map(v => v -> Double.PositiveInfinity).toSeq: _*)
+    mutable.Map(vertices.map(v => v -> Double.PositiveInfinity).toSeq *)
   val predecessors = mutable.Map[String, Edge]()
 
-  // Start from the specified initial currency
   distances(startCurrency) = 0.0
 
-  // Relax edges up to |V|-1 times
   for (_ <- 1 until vertices.size) {
     for (edge <- edges) {
       if (distances(edge.from) + edge.weight < distances(edge.to)) {
@@ -48,8 +51,7 @@ def findArbitrage(
     }
   }
 
-  // Check for negative-weight cycles and track the order of trades
-  edges.foldLeft(None: Option[List[Edge]]) { (acc, edge) =>
+  edges.foldLeft(None: Option[(Double, List[Edge])]) { (acc, edge) =>
     if (distances(edge.from) + edge.weight < distances(edge.to)) {
       var cycle = List[Edge]()
       var current = edge.to
@@ -60,69 +62,68 @@ def findArbitrage(
         current = predecessors(current).from
       }
 
-      // Close the loop properly by ensuring it starts and ends with startCurrency
       cycle.find(_.from == startCurrency) match {
         case Some(startEdge) =>
           val startIndex = cycle.indexOf(startEdge)
-          Some(cycle.drop(startIndex) ++ cycle.take(startIndex))
+          val finalCycle = cycle.drop(startIndex) ++ cycle.take(startIndex)
+
+          val initialAmount = 100.0
+          var currentAmount = initialAmount
+          finalCycle.foreach { edge =>
+            val rate = math.exp(-edge.weight)
+            currentAmount *= rate
+          }
+          val profit = currentAmount - initialAmount
+
+          Some(profit, finalCycle)
+
         case None => None
       }
     } else acc
   }
 }
 
-// Create an HTTP client backend
-val backend = HttpClientSyncBackend()
+object Main extends IOApp.Simple {
+  def run: IO[Unit] = {
+    val backend = HttpClientSyncBackend()
+    val request = basicRequest.get(uri"$url").response(asJson[RatesResponse])
 
-// Send a request and fetch the response
-val request = basicRequest
-  .get(uri"$url")
-  .response(asJson[RatesResponse])
-val response = request.send(backend)
+    for {
+      response <- IO.blocking(request.send(backend))
+      _ <- response.body match {
+        case Right(ratesResponse) =>
+          val edges = ratesResponse.rates.flatMap { case (pair, rate) =>
+            val Array(from, to) = pair.split("-")
+            if (rate.toDouble > 0) Some(Edge(from, to, -log(rate.toDouble)))
+            else None
+          }.toList
+          val vertices = ratesResponse.rates.keys.flatMap(_.split("-")).toSet
 
-// Process the response
-response.body match {
-  case Right(ratesResponse) =>
-    val edges = ratesResponse.rates.flatMap { case (pair, rate) =>
-      val Array(from, to) = pair.split("-")
-      if (rate.toDouble > 0) Some(Edge(from, to, -log(rate.toDouble)))
-      else None
-    }.toList
-    val vertices = ratesResponse.rates.keys.flatMap(_.split("-")).toSet
-
-    findArbitrage(edges, vertices, "DAI") match {
-      case Some(cycle) =>
-        println("Arbitrage Opportunity Detected:")
-
-        // Assuming starting with an arbitrary amount of one of the currencies in the cycle
-        val initialCurrency = cycle.head.from
-        val initialAmount = 100.0
-        var currentAmount = initialAmount
-
-        // Iterate through the cycle
-        cycle.foreach { edge =>
-          val rate = math.exp(
-            -edge.weight
-          ) // Convert the logarithmic weight back to the rate
-          currentAmount *= rate // Update the amount based on the rate
-          println(
-            f"Trade from ${edge.from} to ${edge.to} at rate $rate%.8f, new amount: $currentAmount%.2f ${edge.to}"
-          )
-        }
-
-        // Final output showing the total profit
-        val profit = currentAmount - initialAmount
-        println(
-          f"Started with $initialAmount%.2f $initialCurrency and ended with $currentAmount%.2f $initialCurrency, profit: $profit%.2f $initialCurrency"
-        )
-
-      case None =>
-        println("No arbitrage opportunity detected.")
-    }
-
-  case Left(error) =>
-    println(s"Failed to fetch data: $error")
+          vertices
+            .map(vertex => findArbitrage(edges, vertices, vertex))
+            .toList
+            .parTraverse(identity)
+            .map { results =>
+              results.flatten.maxByOption(_._1) match {
+                case Some((profit, cycle)) =>
+                  println("Arbitrage Opportunity Detected:")
+                  cycle.foreach { edge =>
+                    val rate = math.exp(-edge.weight)
+                    println(
+                      f"Trade from ${edge.from} to ${edge.to} at rate $rate%.8f"
+                    )
+                  }
+                  println(f"Profit: +$profit%.2f%%")
+                case None =>
+                  println("No arbitrage opportunity detected.")
+              }
+            }
+        case Left(error) =>
+          IO.raiseError(new Exception(s"Failed to fetch data: $error"))
+      }
+      _ <- IO(backend.close())
+    } yield ()
+  }
 }
 
-// Close the backend
-backend.close()
+Main.run.unsafeRunSync()
