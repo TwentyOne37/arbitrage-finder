@@ -3,6 +3,7 @@
 // Scala CLI dependencies
 //> using dep "com.softwaremill.sttp.client4::core:4.0.0-M12"
 //> using dep "com.softwaremill.sttp.client4::circe:4.0.0-M12"
+//> using dep "com.softwaremill.sttp.client4::cats:4.0.0-M13"
 //> using dep "org.typelevel::cats-core:2.10.0"
 //> using dep "org.typelevel::cats-effect:3.5.4"
 //> using dep "io.circe::circe-core:0.14.7"
@@ -11,11 +12,11 @@
 
 import sttp.client4._
 import sttp.client4.circe._
-import cats.effect.{IO, IOApp}
+import cats.effect.{IO, IOApp, Resource}
 import cats.effect.unsafe.implicits.global
 import cats.implicits._
 import io.circe.generic.auto._
-import sttp.client4.httpclient.HttpClientSyncBackend
+import sttp.client4.httpclient.cats.HttpClientCatsBackend
 
 import scala.math.log
 import scala.collection.mutable
@@ -37,7 +38,7 @@ def findArbitrage(
     startCurrency: String
 ): IO[Option[(Double, List[Edge])]] = IO {
   val distances =
-    mutable.Map(vertices.map(v => v -> Double.PositiveInfinity).toSeq *)
+    mutable.Map(vertices.map(v => v -> Double.PositiveInfinity).toSeq*)
   val predecessors = mutable.Map[String, Edge]()
 
   distances(startCurrency) = 0.0
@@ -85,44 +86,63 @@ def findArbitrage(
 
 object Main extends IOApp.Simple {
   def run: IO[Unit] = {
-    val backend = HttpClientSyncBackend()
-    val request = basicRequest.get(uri"$url").response(asJson[RatesResponse])
+    val startTime = System.nanoTime()
 
-    for {
-      response <- IO.blocking(request.send(backend))
-      _ <- response.body match {
-        case Right(ratesResponse) =>
-          val edges = ratesResponse.rates.flatMap { case (pair, rate) =>
-            val Array(from, to) = pair.split("-")
-            if (rate.toDouble > 0) Some(Edge(from, to, -log(rate.toDouble)))
-            else None
-          }.toList
-          val vertices = ratesResponse.rates.keys.flatMap(_.split("-")).toSet
+    val backendResource = HttpClientCatsBackend.resource[IO]()
 
-          vertices
-            .map(vertex => findArbitrage(edges, vertices, vertex))
-            .toList
-            .parTraverse(identity)
-            .map { results =>
-              results.flatten.maxByOption(_._1) match {
+    backendResource.use { backend =>
+      val request = basicRequest.get(uri"$url").response(asJson[RatesResponse])
+
+      for {
+        response <- request.send(backend)
+        _ <- response.body match {
+          case Right(ratesResponse) =>
+            val edges = ratesResponse.rates.flatMap { case (pair, rate) =>
+              val Array(from, to) = pair.split("-")
+              if (rate.toDouble > 0) Some(Edge(from, to, -log(rate.toDouble)))
+              else None
+            }.toList
+            val vertices = ratesResponse.rates.keys.flatMap(_.split("-")).toSet
+
+            // Gather all arbitrage results
+            val allArbitrageResults = vertices
+              .map(vertex => findArbitrage(edges, vertices, vertex))
+              .toList
+              .parTraverse(
+                identity
+              ) // Ensure this runs and collects all results before processing
+              .map(_.flatten)
+
+            // Process all gathered results to find the best
+            allArbitrageResults.flatMap { results =>
+              results.maxByOption(_._1) match {
                 case Some((profit, cycle)) =>
-                  println("Arbitrage Opportunity Detected:")
-                  cycle.foreach { edge =>
-                    val rate = math.exp(-edge.weight)
-                    println(
-                      f"Trade from ${edge.from} to ${edge.to} at rate $rate%.8f"
-                    )
+                  IO {
+                    println("Best Arbitrage Opportunity Detected:")
+                    cycle.foreach { edge =>
+                      val rate = math.exp(-edge.weight)
+                      println(
+                        f"Trade from ${edge.from} to ${edge.to} at rate $rate%.8f"
+                      )
+                    }
+                    println(f"Best Profit: +$profit%.2f%%")
+                    val endTime = System.nanoTime()
+                    val duration =
+                      (endTime - startTime) / 1e9d
+                    println(f"Execution Time: $duration%.8f seconds")
                   }
-                  println(f"Profit: +$profit%.2f%%")
                 case None =>
-                  println("No arbitrage opportunity detected.")
+                  IO(println("No arbitrage opportunity detected."))
               }
             }
-        case Left(error) =>
-          IO.raiseError(new Exception(s"Failed to fetch data: $error"))
-      }
-      _ <- IO(backend.close())
-    } yield ()
+
+          case Left(error) =>
+            IO.raiseError(
+              new Exception(s"Failed to fetch data: ${error.getMessage}")
+            )
+        }
+      } yield ()
+    }
   }
 }
 
