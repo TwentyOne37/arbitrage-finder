@@ -13,6 +13,7 @@ import io.circe.generic.auto._
 import sttp.client4.httpclient.HttpClientSyncBackend
 
 import scala.math.log
+import scala.collection.mutable
 
 /* Borger, feel free to let your imagination shine but do not change this snippet. */
 val url: String = args.length match {
@@ -27,15 +28,15 @@ case class Edge(from: String, to: String, weight: Double)
 
 def findArbitrage(
     edges: List[Edge],
-    vertices: Set[String]
+    vertices: Set[String],
+    startCurrency: String
 ): Option[List[Edge]] = {
-  val distances = collection.mutable.Map(
-    vertices.map(v => v -> Double.PositiveInfinity).toSeq: _*
-  )
-  val predecessors = collection.mutable.Map[String, Edge]()
+  val distances =
+    mutable.Map(vertices.map(v => v -> Double.PositiveInfinity).toSeq: _*)
+  val predecessors = mutable.Map[String, Edge]()
 
-  // Start from an arbitrary node, assuming we can trade any currency into any other
-  distances(vertices.head) = 0.0
+  // Start from the specified initial currency
+  distances(startCurrency) = 0.0
 
   // Relax edges up to |V|-1 times
   for (_ <- 1 until vertices.size) {
@@ -47,25 +48,27 @@ def findArbitrage(
     }
   }
 
-  // Check for negative-weight cycles
-  for (edge <- edges) {
+  // Check for negative-weight cycles and track the order of trades
+  edges.foldLeft(None: Option[List[Edge]]) { (acc, edge) =>
     if (distances(edge.from) + edge.weight < distances(edge.to)) {
-      // Reconstruct the negative cycle
       var cycle = List[Edge]()
       var current = edge.to
-      val visited = collection.mutable.Set[String]()
+      val visited = mutable.Set[String]()
       while (!visited.contains(current)) {
         cycle ::= predecessors(current)
         visited += current
         current = predecessors(current).from
       }
 
-      // Return only the part of the cycle from the first repeated currency
-      val startIndex = cycle.indexWhere(_.from == current)
-      return Some(cycle.drop(startIndex).reverse)
-    }
+      // Close the loop properly by ensuring it starts and ends with startCurrency
+      cycle.find(_.from == startCurrency) match {
+        case Some(startEdge) =>
+          val startIndex = cycle.indexOf(startEdge)
+          Some(cycle.drop(startIndex) ++ cycle.take(startIndex))
+        case None => None
+      }
+    } else acc
   }
-  None
 }
 
 // Create an HTTP client backend
@@ -86,17 +89,37 @@ response.body match {
       else None
     }.toList
     val vertices = ratesResponse.rates.keys.flatMap(_.split("-")).toSet
-    findArbitrage(edges, vertices) match {
+
+    findArbitrage(edges, vertices, "DAI") match {
       case Some(cycle) =>
         println("Arbitrage Opportunity Detected:")
+
+        // Assuming starting with an arbitrary amount of one of the currencies in the cycle
+        val initialCurrency = cycle.head.from
+        val initialAmount = 100.0
+        var currentAmount = initialAmount
+
+        // Iterate through the cycle
         cycle.foreach { edge =>
+          val rate = math.exp(
+            -edge.weight
+          ) // Convert the logarithmic weight back to the rate
+          currentAmount *= rate // Update the amount based on the rate
           println(
-            f"Trade from ${edge.from} to ${edge.to} at rate ${math.exp(-edge.weight)}"
+            f"Trade from ${edge.from} to ${edge.to} at rate $rate%.8f, new amount: $currentAmount%.2f ${edge.to}"
           )
         }
+
+        // Final output showing the total profit
+        val profit = currentAmount - initialAmount
+        println(
+          f"Started with $initialAmount%.2f $initialCurrency and ended with $currentAmount%.2f $initialCurrency, profit: $profit%.2f $initialCurrency"
+        )
+
       case None =>
         println("No arbitrage opportunity detected.")
     }
+
   case Left(error) =>
     println(s"Failed to fetch data: $error")
 }
